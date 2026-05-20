@@ -2,88 +2,44 @@ import json
 import requests
 from datetime import datetime
 from django.shortcuts import render
+from .llm_service import get_biometeo_recommendations
 
 
 def interpret_weather_code(code):
-    """Возвращает иконку и описание погоды по коду WMO."""
     mapping = {
-        0: ("☀️", "Ясно"),
-        1: ("🌤️", "Преимущественно ясно"),
-        2: ("⛅", "Переменная облачность"),
-        3: ("☁️", "Пасмурно"),
-        45: ("🌫️", "Туман"),
-        48: ("🌫️", "Туман с изморозью"),
-        51: ("🌦️", "Лёгкая морось"),
-        53: ("🌦️", "Морось"),
-        55: ("🌧️", "Сильная морось"),
-        61: ("🌧️", "Небольшой дождь"),
-        63: ("🌧️", "Дождь"),
-        65: ("🌧️", "Сильный дождь"),
-        71: ("❄️", "Небольшой снег"),
-        73: ("❄️", "Снег"),
-        75: ("❄️", "Сильный снег"),
-        77: ("❄️", "Снежные зёрна"),
-        80: ("🌦️", "Ливень"),
-        81: ("🌧️", "Сильный ливень"),
-        82: ("🌧️", "Очень сильный ливень"),
-        85: ("❄️", "Снегопад"),
-        86: ("❄️", "Сильный снегопад"),
-        95: ("⛈️", "Гроза"),
-        96: ("⛈️", "Гроза с градом"),
-        99: ("⛈️", "Сильная гроза с градом"),
+        0: ("☀️", "Ясно"), 1: ("🌤️", "Преимущественно ясно"), 2: ("⛅", "Переменная облачность"),
+        3: ("☁️", "Пасмурно"), 45: ("🌫️", "Туман"), 51: ("🌦️", "Лёгкая морось"),
+        61: ("🌧️", "Небольшой дождь"), 63: ("🌧️", "Дождь"), 65: ("🌧️", "Сильный дождь"),
+        71: ("❄️", "Небольшой снег"), 80: ("🌦️", "Ливень"), 95: ("⛈️", "Гроза"),
     }
     return mapping.get(code, ("🌡️", "Неизвестно"))
 
 
-def fetch_opemeteo_forecast(lat, lon, days=7):
+def fetch_opemeteo_forecast(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": ",".join([
-            "temperature_2m_max",
-            "temperature_2m_min",
-            "precipitation_sum",
-            "wind_speed_10m_max",
-            "uv_index_max",
-            "weather_code",
-        ]),
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max,uv_index_max,weather_code",
         "timezone": "auto",
-        "forecast_days": days,
+        "forecast_days": 7,
     }
-
-    resp = requests.get(url, params=params, timeout=10)
+    resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
-    data = resp.json()
-    daily = data.get("daily", {})
+    data = resp.json()["daily"]
 
     weather_days = []
-    for i in range(len(daily["time"])):
-        dt = datetime.fromisoformat(daily["time"][i])
-        day_name = dt.strftime("%a")[:2].upper()
-        date_str = dt.strftime("%d %b").lower()
-
-        max_temp = daily["temperature_2m_max"][i]
-        min_temp = daily["temperature_2m_min"][i]
-        avg_temp = round((max_temp + min_temp) / 2, 0)
-        wind = daily["wind_speed_10m_max"][i]
-        uv = daily["uv_index_max"][i]
-        weather_code = daily["weather_code"][i]
-        precipitation = daily["precipitation_sum"][i] > 0
-
-        icon, condition = interpret_weather_code(weather_code)
-
+    for i in range(len(data["time"])):
+        dt = datetime.fromisoformat(data["time"][i])
         weather_days.append({
-            "name": day_name,
-            "date": date_str,
-            "temp": avg_temp,
-            "wind": wind,
-            "uv": uv,
-            "icon": icon,
-            "condition": condition,
-            "rain": precipitation,
+            "name": dt.strftime("%a")[:2].upper(),
+            "date": dt.strftime("%d %b").lower(),
+            "temp": round((data["temperature_2m_max"][i] + data["temperature_2m_min"][i]) / 2),
+            "wind": round(data["wind_speed_10m_max"][i]),
+            "uv": round(data["uv_index_max"][i], 1),
+            "icon": interpret_weather_code(data["weather_code"][i])[0],
+            "condition": interpret_weather_code(data["weather_code"][i])[1],
         })
-
     return weather_days
 
 
@@ -91,24 +47,39 @@ def weather_ip_view(request):
     error = None
     weather_data = []
     city = "Неизвестно"
+    recommendations = None
 
     geo = getattr(request, 'client_ip', None)
 
     if geo and geo.get('status') == 'success':
         lat = geo.get('lat')
         lon = geo.get('lon')
-        city = f"{geo.get('city', '')}, {geo.get('country', '')}"
+        city = f"{geo.get('city')}, {geo.get('country')}"
 
         try:
             weather_data = fetch_opemeteo_forecast(lat, lon)
+
+            # === ВАЖНО: ВЫЗОВ LLM ===
+            print("🔄 Запуск LLM-рекомендаций...")   # ← должен появиться
+            user_profile = {
+                'age': getattr(request.user, 'age', 35),
+                'height': getattr(request.user, 'height', 175),
+                'weight': getattr(request.user, 'weight', 75),
+                'sensitivity': request.GET.get('sensitivity', 'medium'),
+                'is_sick': getattr(request.user, 'is_sick', False),
+            }
+            recommendations = get_biometeo_recommendations(weather_data, user_profile)
+
         except Exception as e:
-            error = f"Ошибка получения прогноза: {e}"
+            error = f"Ошибка: {str(e)}"
+            print("Ошибка в weather_ip_view:", e)
     else:
-        error = "Не удалось определить город по вашему IP-адресу."
+        error = "Не удалось определить местоположение по IP."
 
     context = {
         'city': city,
         'weather_data_json': json.dumps(weather_data, ensure_ascii=False),
+        'recommendations_json': json.dumps(recommendations, ensure_ascii=False) if recommendations else 'null',
         'error': error,
     }
     return render(request, 'weather.html', context)

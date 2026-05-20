@@ -11,8 +11,8 @@ class GeoLocationMiddleware(MiddlewareMixin):
         if ip in ('127.0.0.1', 'localhost', '::1'):
             request.client_ip = {
                 'status': 'success',
-                'lat': 45.0442,
-                'lon': 38.9722,
+                'lat': 25.77,
+                'lon': 80.20,
                 'city': 'Краснодар',
                 'country': 'Россия',
             }
